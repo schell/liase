@@ -1,0 +1,26 @@
+# liase configuration
+#
+# This file should be placed at the Tauri app data directory:
+#   macOS:   ~/Library/Application Support/com.liase.app/config.toml
+#   Linux:   ~/.local/share/com.liase.app/config.toml
+#   Windows: %APPDATA%/com.liase.app/config.toml
+
+[github]
+# GitHub Personal Access Token.
+# Can also be set via the GITHUB_TOKEN environment variable.
+# Supports both classic PATs and fine-grained PATs.
+# Classic PAT scopes needed: repo, read:org, notifications
+# token = "ghp_..."
+
+# How often to poll GitHub for updates (in seconds).
+poll_interval_secs = 60
+
+# Subscribe to entire organizations (auto-discovers all repos):
+[[github.subscriptions]]
+kind = "org"
+name = "zcash"
+
+# Subscribe to individual repositories:
+# [[github.subscriptions]]
+# kind = "repo"
+# name = "schell/mogwai"

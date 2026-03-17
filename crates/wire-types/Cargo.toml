@@ -1,0 +1,15 @@
+[package]
+name = "liase-wire-types"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["database"]
+database = ["dep:tymigrawr", "dep:snafu"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+snafu = { workspace = true, optional = true }
+tymigrawr = { workspace = true, optional = true }
+

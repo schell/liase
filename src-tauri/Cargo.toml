@@ -1,0 +1,29 @@
+[package]
+name = "liase"
+version = "0.1.0"
+description = "GitHub monitor for developer liaisons"
+authors = ["schell"]
+edition = "2021"
+
+[lib]
+name = "liase_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+env_logger = "0.11"
+liase-wire-types = { path = "../crates/wire-types", features = ["database"] }
+log.workspace = true
+octocrab = "0.44"
+serde.workspace = true
+serde_json = "1"
+snafu.workspace = true 
+sqlite = { version = "0.31", features = ["bundled"] }
+tymigrawr.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+toml = "0.8"
