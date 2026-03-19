@@ -8,7 +8,7 @@ console_error_panic_hook = "0.1.7"
 console_log = "1.0.0"
 futures-lite = "2.6.0"
 iti = { git = "https://github.com/schell/iti.git", default-features = false, features = ["embed-assets", "system9"] }
-liase-wire-types = { path = "crates/wire-types" }
+liase-wire-types = { path = "crates/wire-types", default-features = false }
 log.workspace = true
 mogwai = "0.7.2"
 serde.workspace = true
@@ -34,4 +34,4 @@ log = "0.4.27"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 snafu = "0.7"
-tymigrawr = { path = "../tymigrawr/main/crates/tymigrawr" }
+tymigrawr = { git = "https://github.com/schell/tymigrawr.git", default-features = false }#path = "../tymigrawr/main/crates/tymigrawr" }

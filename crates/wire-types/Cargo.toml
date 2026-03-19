@@ -5,11 +5,11 @@ edition = "2024"
 
 [features]
 default = ["database"]
-database = ["dep:tymigrawr", "dep:snafu"]
+database = ["tymigrawr/sqlite"]
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-snafu = { workspace = true, optional = true }
-tymigrawr = { workspace = true, optional = true }
+snafu.workspace = true
+tymigrawr = { workspace = true, default-features = false }
 

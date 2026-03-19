@@ -1,7 +1,5 @@
 //! Wire types for sending between BE<->FE.
-#[cfg(feature = "database")]
 use snafu::prelude::*;
-#[cfg(feature = "database")]
 use tymigrawr::{HasCrudFields, IsCrudField};
 
 /// What kind of GitHub event this represents.
@@ -72,8 +70,7 @@ impl std::fmt::Display for EventKind {
 /// A GitHub event (issue, PR, or comment) normalized for display.
 ///
 /// Version 1 of the events table schema.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
-#[cfg_attr(feature = "database", derive(HasCrudFields))]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq, HasCrudFields)]
 pub struct GhEventV1 {
     /// Unique identifier: "{owner}/{repo}#{number}" or
     /// "{owner}/{repo}#{number}:comment:{comment_id}"
