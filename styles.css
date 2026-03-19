@@ -16,9 +16,17 @@ nav.navbar .container-fluid {
   padding-left: 80px;
 }
 
+/* Navbar logo */
+.navbar-logo {
+  height: 28px;
+  width: 28px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
 .liase-nav-bg {
   --bs--bg-opacity: 1;
-  background-color: rgba(64, 96, 127, 1) !important;
+  background-color: rgba(151, 167, 154, 1) !important;
 }
 
 /* Tabs inside navbar */
@@ -26,7 +34,7 @@ nav.navbar .nav-tabs {
   border-bottom: none;
   margin-bottom: 0;
   position: relative;
-  top: 10px;
+  top: 12px;
 }
 
 /* Panes content */

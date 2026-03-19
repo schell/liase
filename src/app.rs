@@ -162,14 +162,16 @@ impl<V: View> Default for App<V> {
         rsx! {
             let wrapper = div(class = "d-flex flex-column vh-100") {
                 nav(
-                    class = "navbar navbar-expand navbar-dark liase-nav-bg",
+                    class = "navbar navbar-dark liase-nav-bg",
                     data_tauri_drag_region = "",
                 ) {
                     div(
-                        class = "container-fluid",
+                        class = "container-fluid d-flex align-items-center gap-3",
                         data_tauri_drag_region = "",
+                        style:justify_content = "flex-start",
                     ) {
-                        span(class ="navbar-brand mb-0 h1") {
+                        span(class = "navbar-brand mb-0 h1 d-flex align-items-center") {
+                            img(src = "/logo.jpg", class = "navbar-logo me-2", alt = "liase") {}
                             "Liase"
                         }
                         {&tab_list}
