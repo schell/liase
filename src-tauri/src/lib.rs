@@ -17,36 +17,76 @@ use store::Store;
 // ---------------------------------------------------------------------------
 
 struct App {
-    config: config::RawConfig,
-    #[allow(dead_code)]
+    config: Mutex<config::RawConfig>,
     config_path: PathBuf,
     store: Arc<Store>,
     /// Signal the background poll task to wake up immediately.
     poll_notify: Arc<Notify>,
     /// The poller, if a token was configured.
-    poller: Option<Arc<Mutex<GitHubPoller>>>,
+    poller: Mutex<Option<Arc<Mutex<GitHubPoller>>>>,
+    /// Handle to the background poll task (so we can abort + respawn).
+    poll_task_handle: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// Tauri app handle (set during setup, needed for spawning tasks / emitting).
+    app_handle: Mutex<Option<tauri::AppHandle>>,
 }
 
 impl App {
     fn new(config_path: PathBuf, db_path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
-        let config = config::load_config(&config_path);
+        let raw_config = config::load_config(&config_path);
         let store = Arc::new(Store::open(&db_path)?);
         let poll_notify = Arc::new(Notify::new());
 
         // Create the poller only if we have a token
-        let poller = config::resolve_token(&config).map(|token| {
-            let p = GitHubPoller::new(&token, config.github.subscriptions.clone())
+        let poller = config::resolve_token(&raw_config).map(|token| {
+            let p = GitHubPoller::new(&token, raw_config.github.subscriptions.clone())
                 .expect("could not create GitHub poller");
             Arc::new(Mutex::new(p))
         });
 
         Ok(App {
-            config,
+            config: Mutex::new(raw_config),
             config_path,
             store,
             poll_notify,
-            poller,
+            poller: Mutex::new(poller),
+            poll_task_handle: Mutex::new(None),
+            app_handle: Mutex::new(None),
         })
+    }
+
+    /// Spawn (or respawn) the background poll task using the current config.
+    /// Aborts any existing poll task first.
+    async fn respawn_poll_task(&self) {
+        // Abort existing task
+        let mut handle_guard = self.poll_task_handle.lock().await;
+        if let Some(old_handle) = handle_guard.take() {
+            old_handle.abort();
+        }
+
+        let poller_guard = self.poller.lock().await;
+        let Some(poller) = poller_guard.clone() else {
+            return;
+        };
+
+        let config_guard = self.config.lock().await;
+        let interval_secs = config_guard.github.poll_interval_secs;
+        drop(config_guard);
+        drop(poller_guard);
+
+        let app_handle_guard = self.app_handle.lock().await;
+        let Some(app_handle) = app_handle_guard.clone() else {
+            return;
+        };
+        drop(app_handle_guard);
+
+        let task_store = self.store.clone();
+        let task_notify = self.poll_notify.clone();
+
+        let new_handle = tauri::async_runtime::spawn(async move {
+            poll_task(poller, task_store, task_notify, interval_secs, app_handle).await;
+        });
+
+        *handle_guard = Some(new_handle);
     }
 }
 
@@ -74,14 +114,19 @@ async fn handle_command(
                 .map_err(|e| AppError::new(ErrorKind::Database, e.to_string()))?;
             Ok(Response::Event(event))
         }
-        Command::GetConfig => Ok(Response::Config(config::to_app_config(&state.config))),
+        Command::GetConfig => {
+            let config_guard = state.config.lock().await;
+            Ok(Response::Config(config::to_app_config(&config_guard)))
+        }
         Command::PollNow => {
-            if state.poller.is_none() {
+            let poller_guard = state.poller.lock().await;
+            if poller_guard.is_none() {
                 return Err(AppError::new(
                     ErrorKind::Config,
                     "No GitHub token configured",
                 ));
             }
+            drop(poller_guard);
             state.poll_notify.notify_one();
             Ok(Response::Ok)
         }
@@ -97,6 +142,64 @@ async fn handle_command(
                 .store
                 .mark_all_read(repo.as_deref())
                 .map_err(|e| AppError::new(ErrorKind::Database, e.to_string()))?;
+            Ok(Response::Ok)
+        }
+        Command::SaveConfig(app_config) => {
+            // Convert wire type to internal config
+            let new_raw = config::from_app_config(&app_config);
+
+            // Write to disk
+            config::save_config(&state.config_path, &new_raw)
+                .map_err(|e| AppError::new(ErrorKind::Config, e.to_string()))?;
+
+            // Check what changed and update in-memory config
+            let (token_changed, subs_changed, interval_changed, new_token) = {
+                let mut config_guard = state.config.lock().await;
+                let old_token = config::resolve_token(&config_guard);
+                let new_token = config::resolve_token(&new_raw);
+                let token_changed = old_token != new_token;
+                let subs_changed = config_guard.github.subscriptions.len()
+                    != new_raw.github.subscriptions.len()
+                    || config_guard
+                        .github
+                        .subscriptions
+                        .iter()
+                        .zip(new_raw.github.subscriptions.iter())
+                        .any(|(a, b)| a.kind != b.kind || a.name != b.name);
+                let interval_changed =
+                    config_guard.github.poll_interval_secs != new_raw.github.poll_interval_secs;
+                *config_guard = new_raw;
+                (token_changed, subs_changed, interval_changed, new_token)
+            };
+
+            // Recreate poller if token or subscriptions changed
+            if token_changed || subs_changed {
+                let mut poller_guard = state.poller.lock().await;
+                *poller_guard = new_token.map(|token| {
+                    let config_guard =
+                        state.config.try_lock().expect("config lock not contended");
+                    let p =
+                        GitHubPoller::new(&token, config_guard.github.subscriptions.clone())
+                            .expect("could not create GitHub poller");
+                    Arc::new(Mutex::new(p))
+                });
+            }
+
+            // Respawn poll task if anything relevant changed
+            if token_changed || subs_changed || interval_changed {
+                state.respawn_poll_task().await;
+            }
+
+            // Emit config updated event
+            let app_handle_guard = state.app_handle.lock().await;
+            if let Some(ref handle) = *app_handle_guard {
+                let event = ServerEvent::ConfigUpdated(app_config);
+                if let Err(e) = handle.emit("server-event", &event) {
+                    log::error!("Failed to emit config-updated: {e}");
+                }
+            }
+
+            log::info!("Configuration saved and applied");
             Ok(Response::Ok)
         }
     }
@@ -199,28 +302,38 @@ pub fn run() {
             let app_state =
                 App::new(config_path, db_path).expect("could not initialize app state");
 
-            let config_summary = config::to_app_config(&app_state.config);
+            let (config_summary, poll_interval) = {
+                let config_guard = app_state.config.blocking_lock();
+                let summary = config::to_app_config(&config_guard);
+                let interval = config_guard.github.poll_interval_secs;
+                (summary, interval)
+            };
+
             log::info!(
                 "Loaded {} subscriptions, token configured: {}",
                 config_summary.subscriptions.len(),
                 config_summary.has_token,
             );
 
-            // Clone what the background task needs before moving app_state
-            let maybe_poller = app_state.poller.clone();
+            // Clone what we need before moving app_state into Tauri
+            let maybe_poller = app_state.poller.blocking_lock().clone();
             let task_store = app_state.store.clone();
             let task_notify = app_state.poll_notify.clone();
-            let poll_interval = app_state.config.github.poll_interval_secs;
             let app_handle = app.handle().clone();
 
             app.manage(app_state);
 
+            // Store the app handle in state (for SaveConfig to use later)
+            let managed_state: State<App> = app.state();
+            *managed_state.app_handle.blocking_lock() = Some(app_handle.clone());
+
             // Spawn the background poll task if we have a token
             if let Some(poller) = maybe_poller {
                 log::info!("Starting background poll task (interval: {poll_interval}s)");
-                tauri::async_runtime::spawn(async move {
+                let handle = tauri::async_runtime::spawn(async move {
                     poll_task(poller, task_store, task_notify, poll_interval, app_handle).await;
                 });
+                *managed_state.poll_task_handle.blocking_lock() = Some(handle);
             } else {
                 log::warn!(
                     "No GitHub token configured — polling disabled. \

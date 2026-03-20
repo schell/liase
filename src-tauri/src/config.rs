@@ -1,15 +1,15 @@
-//! TOML configuration loading.
+//! TOML configuration loading and saving.
 
 use liase_wire_types::{AppConfig, Subscription, SubscriptionKind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Raw TOML config structure (matches the config.toml file format).
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct RawConfig {
     pub github: GitHubConfig,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct GitHubConfig {
     pub token: Option<String>,
     #[serde(default = "default_poll_interval")]
@@ -18,7 +18,7 @@ pub struct GitHubConfig {
     pub subscriptions: Vec<RawSubscription>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawSubscription {
     pub kind: String,
     pub name: String,
@@ -62,6 +62,16 @@ pub fn load_config(path: &PathBuf) -> RawConfig {
     }
 }
 
+/// Save the config to disk as TOML.
+pub fn save_config(path: &Path, config: &RawConfig) -> Result<(), std::io::Error> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let toml_str =
+        toml::to_string_pretty(config).map_err(|e| std::io::Error::other(e.to_string()))?;
+    std::fs::write(path, toml_str)
+}
+
 /// Resolve the GitHub token: config file value takes priority over env var.
 pub fn resolve_token(config: &RawConfig) -> Option<String> {
     config
@@ -73,6 +83,7 @@ pub fn resolve_token(config: &RawConfig) -> Option<String> {
 
 /// Convert a RawConfig into the wire-type AppConfig for the frontend.
 pub fn to_app_config(config: &RawConfig) -> AppConfig {
+    let token = resolve_token(config);
     let subscriptions = config
         .github
         .subscriptions
@@ -89,6 +100,28 @@ pub fn to_app_config(config: &RawConfig) -> AppConfig {
     AppConfig {
         poll_interval_secs: config.github.poll_interval_secs,
         subscriptions,
-        has_token: resolve_token(config).is_some(),
+        has_token: token.is_some(),
+        token,
+    }
+}
+
+/// Convert a wire-type AppConfig back into a RawConfig for saving.
+pub fn from_app_config(app_config: &AppConfig) -> RawConfig {
+    RawConfig {
+        github: GitHubConfig {
+            token: app_config.token.clone(),
+            poll_interval_secs: app_config.poll_interval_secs,
+            subscriptions: app_config
+                .subscriptions
+                .iter()
+                .map(|s| RawSubscription {
+                    kind: match s.kind {
+                        SubscriptionKind::Org => "org".to_string(),
+                        SubscriptionKind::Repo => "repo".to_string(),
+                    },
+                    name: s.name.clone(),
+                })
+                .collect(),
+        },
     }
 }

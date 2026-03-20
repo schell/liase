@@ -134,12 +134,14 @@ pub struct Subscription {
 }
 
 /// App configuration as seen by the frontend.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct AppConfig {
     pub poll_interval_secs: u64,
     pub subscriptions: Vec<Subscription>,
-    /// Whether a GitHub token is configured (never exposes the actual token).
+    /// Whether a GitHub token is configured.
     pub has_token: bool,
+    /// The actual token value (for editing). `None` means no token.
+    pub token: Option<String>,
 }
 
 /// Status of a subscription (for the settings/status view).
@@ -185,6 +187,8 @@ pub enum Command {
     MarkRead { id: String },
     /// Mark all events as read (optionally filtered by repo).
     MarkAllRead { repo: Option<String> },
+    /// Save updated configuration.
+    SaveConfig(AppConfig),
 }
 
 /// Responses returned from the backend to the frontend (paired with a Command).
@@ -249,6 +253,8 @@ impl Response {
 pub enum ServerEvent {
     /// New events were stored after a poll cycle.
     NewEvents { count: u32 },
+    /// Configuration was updated (after a SaveConfig command).
+    ConfigUpdated(AppConfig),
 }
 
 // ---------------------------------------------------------------------------
