@@ -3,7 +3,7 @@ use iti::components::alert::Alert;
 use iti::components::button::Button;
 use iti::components::card::Card;
 use iti::components::Flavor;
-use liase_wire_types::{AppConfig, SubscriptionKind};
+use liase_wire_types::{AppConfig, Command, SubscriptionKind};
 use mogwai::future::MogwaiFutureExt;
 use mogwai::web::prelude::*;
 
@@ -94,14 +94,16 @@ impl<V: View> SettingsView<V> {
     }
 
     async fn load_config(&mut self) {
-        match invoke::get_config().await {
+        let result = invoke::send(&Command::GetConfig).await;
+        match result.and_then(|r| r.into_config()) {
             Ok(config) => {
                 self.update_connection_card(&config);
                 self.update_subs_card(&config);
                 self.status_alert.set_is_visible(false);
             }
             Err(e) => {
-                self.status_alert.set_text(format!("Error loading config: {e}"));
+                self.status_alert
+                    .set_text(format!("Error loading config: {e}"));
                 self.status_alert.set_flavor(Flavor::Danger);
                 self.status_alert.set_is_visible(true);
             }

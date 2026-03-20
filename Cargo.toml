@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+async-channel = "2.3"
 console_error_panic_hook = "0.1.7"
 console_log = "1.0.0"
 futures-lite = "2.6.0"
@@ -14,6 +15,7 @@ mogwai = "0.7.2"
 serde.workspace = true
 serde_json.workspace = true
 serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 

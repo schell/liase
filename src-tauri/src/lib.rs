@@ -1,4 +1,4 @@
-use liase_wire_types::{AppConfig, AppError, ErrorKind, EventFilter, GhEvent};
+use liase_wire_types::{AppError, Command, ErrorKind, Response, ServerEvent};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
@@ -51,59 +51,55 @@ impl App {
 }
 
 // ---------------------------------------------------------------------------
-// Tauri commands
+// Single command dispatcher
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-async fn get_events(
+async fn handle_command(
     state: State<'_, App>,
-    filter: EventFilter,
-) -> Result<Vec<GhEvent>, AppError> {
-    state
-        .store
-        .get_events(&filter)
-        .map_err(|e| AppError::new(ErrorKind::Database, e.to_string()))
-}
-
-#[tauri::command]
-async fn get_event(state: State<'_, App>, id: String) -> Result<Option<GhEvent>, AppError> {
-    state
-        .store
-        .get_event(&id)
-        .map_err(|e| AppError::new(ErrorKind::Database, e.to_string()))
-}
-
-#[tauri::command]
-async fn mark_read(state: State<'_, App>, id: String) -> Result<(), AppError> {
-    state
-        .store
-        .mark_read(&id)
-        .map_err(|e| AppError::new(ErrorKind::Database, e.to_string()))
-}
-
-#[tauri::command]
-async fn mark_all_read(state: State<'_, App>, repo: Option<String>) -> Result<(), AppError> {
-    state
-        .store
-        .mark_all_read(repo.as_deref())
-        .map_err(|e| AppError::new(ErrorKind::Database, e.to_string()))
-}
-
-#[tauri::command]
-async fn get_config(state: State<'_, App>) -> Result<AppConfig, AppError> {
-    Ok(config::to_app_config(&state.config))
-}
-
-#[tauri::command]
-async fn poll_now(state: State<'_, App>) -> Result<(), AppError> {
-    if state.poller.is_none() {
-        return Err(AppError::new(
-            ErrorKind::Config,
-            "No GitHub token configured",
-        ));
+    cmd: Command,
+) -> Result<Response, AppError> {
+    match cmd {
+        Command::GetEvents(filter) => {
+            let events = state
+                .store
+                .get_events(&filter)
+                .map_err(|e| AppError::new(ErrorKind::Database, e.to_string()))?;
+            Ok(Response::Events(events))
+        }
+        Command::GetEvent { id } => {
+            let event = state
+                .store
+                .get_event(&id)
+                .map_err(|e| AppError::new(ErrorKind::Database, e.to_string()))?;
+            Ok(Response::Event(event))
+        }
+        Command::GetConfig => Ok(Response::Config(config::to_app_config(&state.config))),
+        Command::PollNow => {
+            if state.poller.is_none() {
+                return Err(AppError::new(
+                    ErrorKind::Config,
+                    "No GitHub token configured",
+                ));
+            }
+            state.poll_notify.notify_one();
+            Ok(Response::Ok)
+        }
+        Command::MarkRead { id } => {
+            state
+                .store
+                .mark_read(&id)
+                .map_err(|e| AppError::new(ErrorKind::Database, e.to_string()))?;
+            Ok(Response::Ok)
+        }
+        Command::MarkAllRead { repo } => {
+            state
+                .store
+                .mark_all_read(repo.as_deref())
+                .map_err(|e| AppError::new(ErrorKind::Database, e.to_string()))?;
+            Ok(Response::Ok)
+        }
     }
-    state.poll_notify.notify_one();
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +107,7 @@ async fn poll_now(state: State<'_, App>) -> Result<(), AppError> {
 // ---------------------------------------------------------------------------
 
 /// Runs the polling loop. Wakes on the configured interval or when
-/// `poll_notify` is signalled (by the `poll_now` command).
+/// `poll_notify` is signalled (by the `PollNow` command).
 async fn poll_task(
     poller: Arc<Mutex<GitHubPoller>>,
     store: Arc<Store>,
@@ -155,11 +151,15 @@ async fn poll_task(
         }
 
         if new_count > 0 {
-            log::info!("Stored {new_count} new events ({} total upserted)", events.len());
+            log::info!(
+                "Stored {new_count} new events ({} total upserted)",
+                events.len()
+            );
 
-            // Emit to the frontend so it can refresh
-            if let Err(e) = app_handle.emit("new-events", new_count) {
-                log::error!("Failed to emit new-events: {e}");
+            // Emit typed ServerEvent to the frontend
+            let server_event = ServerEvent::NewEvents { count: new_count };
+            if let Err(e) = app_handle.emit("server-event", &server_event) {
+                log::error!("Failed to emit server-event: {e}");
             }
         }
     }
@@ -196,8 +196,8 @@ pub fn run() {
             log::info!("Config path: {}", config_path.display());
             log::info!("Database path: {}", db_path.display());
 
-            let app_state = App::new(config_path, db_path)
-                .expect("could not initialize app state");
+            let app_state =
+                App::new(config_path, db_path).expect("could not initialize app state");
 
             let config_summary = config::to_app_config(&app_state.config);
             log::info!(
@@ -217,12 +217,9 @@ pub fn run() {
 
             // Spawn the background poll task if we have a token
             if let Some(poller) = maybe_poller {
-                log::info!(
-                    "Starting background poll task (interval: {poll_interval}s)"
-                );
+                log::info!("Starting background poll task (interval: {poll_interval}s)");
                 tauri::async_runtime::spawn(async move {
-                    poll_task(poller, task_store, task_notify, poll_interval, app_handle)
-                        .await;
+                    poll_task(poller, task_store, task_notify, poll_interval, app_handle).await;
                 });
             } else {
                 log::warn!(
@@ -233,14 +230,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            get_events,
-            get_event,
-            mark_read,
-            mark_all_read,
-            get_config,
-            poll_now,
-        ])
+        .invoke_handler(tauri::generate_handler![handle_command])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

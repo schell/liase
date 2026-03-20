@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use futures_lite::FutureExt;
 use iti::components::pane::Panes;
 use iti::components::tab::{TabList, TabListEvent};
+use liase_wire_types::{AppError, Command, ErrorKind, Response, ServerEvent};
 use mogwai::view::AppendArg;
 use mogwai::web::prelude::*;
 use wasm_bindgen::prelude::*;
@@ -19,7 +20,6 @@ use timeline::TimelineView;
 
 pub mod invoke {
     use super::*;
-    use liase_wire_types::{AppConfig, AppError, ErrorKind, EventFilter, GhEvent};
 
     #[wasm_bindgen]
     extern "C" {
@@ -40,43 +40,64 @@ pub mod invoke {
         }
     }
 
-    pub async fn cmd<T: serde::Serialize, X: serde::de::DeserializeOwned>(
-        name: &str,
-        args: &T,
-    ) -> Result<X, AppError> {
-        let value = serde_wasm_bindgen::to_value(args).map_err(|e| {
-            AppError::new(
-                ErrorKind::Serialization,
-                format!("could not serialize {}: {e}", std::any::type_name::<T>()),
-            )
-        })?;
-        let result = invoke(name, value).await;
+    /// Send a typed [`Command`] to the backend and receive a typed [`Response`].
+    pub async fn send(command: &Command) -> Result<Response, AppError> {
+        let args = serde_wasm_bindgen::to_value(&serde_json::json!({ "cmd": command }))
+            .map_err(|e| {
+                AppError::new(
+                    ErrorKind::Serialization,
+                    format!("could not serialize command: {e}"),
+                )
+            })?;
+        let result = invoke("handle_command", args).await;
         match result {
-            Ok(value) => deserialize_as::<X>(value),
+            Ok(value) => deserialize_as::<Response>(value),
             Err(e) => Err(deserialize_as::<AppError>(e)?),
         }
     }
+}
 
-    // Typed wrappers for each Tauri command
+// ---------------------------------------------------------------------------
+// ServerEvent listener (backend → frontend push)
+// ---------------------------------------------------------------------------
 
-    pub async fn get_events(filter: &EventFilter) -> Result<Vec<GhEvent>, AppError> {
-        cmd("get_events", &serde_json::json!({ "filter": filter })).await
+pub mod events {
+    use super::*;
+
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "event"], catch)]
+        async fn listen(
+            event: &str,
+            handler: &Closure<dyn FnMut(JsValue)>,
+        ) -> Result<JsValue, JsValue>;
     }
 
-    pub async fn get_config() -> Result<AppConfig, AppError> {
-        cmd("get_config", &serde_json::json!({})).await
-    }
-
-    pub async fn poll_now() -> Result<(), AppError> {
-        cmd("poll_now", &serde_json::json!({})).await
-    }
-
-    pub async fn mark_read(id: &str) -> Result<(), AppError> {
-        cmd("mark_read", &serde_json::json!({ "id": id })).await
-    }
-
-    pub async fn mark_all_read(repo: Option<&str>) -> Result<(), AppError> {
-        cmd("mark_all_read", &serde_json::json!({ "repo": repo })).await
+    /// Start listening for [`ServerEvent`]s from the backend.
+    ///
+    /// Returns a [`async_channel::Receiver`] that yields each event as it
+    /// arrives. The JS listener closure is intentionally leaked (via
+    /// `Closure::forget`) so it outlives the call.
+    pub async fn subscribe() -> async_channel::Receiver<ServerEvent> {
+        let (tx, rx) = async_channel::bounded(16);
+        let closure = Closure::new(move |event: JsValue| {
+            // Tauri event shape: { event: "server-event", id: ..., payload: <ServerEvent> }
+            if let Ok(payload) = js_sys::Reflect::get(&event, &"payload".into()) {
+                match serde_wasm_bindgen::from_value::<ServerEvent>(payload) {
+                    Ok(server_event) => {
+                        let _ = tx.try_send(server_event);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to deserialize ServerEvent: {e:?}");
+                    }
+                }
+            }
+        });
+        if let Err(e) = listen("server-event", &closure).await {
+            log::error!("Failed to listen for server-event: {e:?}");
+        }
+        closure.forget();
+        rx
     }
 }
 

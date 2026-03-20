@@ -3,12 +3,11 @@ use iti::components::alert::Alert;
 use iti::components::badge::Badge;
 use iti::components::button::Button;
 use iti::components::Flavor;
-use liase_wire_types::{EventFilter, EventKind, GhEvent};
+use liase_wire_types::{Command, EventFilter, EventKind, GhEvent, ServerEvent};
 use mogwai::future::MogwaiFutureExt;
 use mogwai::web::prelude::*;
 
-use super::invoke;
-use super::open;
+use super::{events, invoke, open};
 
 // ---------------------------------------------------------------------------
 // Individual event row
@@ -115,6 +114,8 @@ pub struct TimelineView<V: View> {
     filter_mode: FilterMode,
     /// Whether initial load has happened
     loaded: bool,
+    /// Receiver for backend-pushed ServerEvents
+    server_events: Option<async_channel::Receiver<ServerEvent>>,
 }
 
 impl<V: View> Default for TimelineView<V> {
@@ -165,6 +166,7 @@ impl<V: View> Default for TimelineView<V> {
             event_rows: Vec::new(),
             filter_mode: FilterMode::All,
             loaded: false,
+            server_events: None,
         }
     }
 }
@@ -175,7 +177,7 @@ enum TimelineAction {
     FilterUnread,
     MarkAllRead,
     EventClicked(usize),
-    PollTimer,
+    NewServerEvents,
 }
 
 impl<V: View> TimelineView<V> {
@@ -191,7 +193,8 @@ impl<V: View> TimelineView<V> {
             limit: Some(200),
         };
 
-        match invoke::get_events(&filter).await {
+        let result = invoke::send(&Command::GetEvents(filter)).await;
+        match result.and_then(|r| r.into_events()) {
             Ok(events) => {
                 // Remove old rows from DOM
                 for row in self.event_rows.drain(..) {
@@ -241,12 +244,13 @@ impl<V: View> TimelineView<V> {
     }
 
     pub async fn step(&mut self) {
-        // On first step, do initial load
+        // On first step, subscribe to server events and do initial load
         if !self.loaded {
+            self.server_events = Some(events::subscribe().await);
             self.load_events().await;
         }
 
-        // Race all possible user actions + auto-refresh timer
+        // Race all possible user actions + server event push
         let action = {
             let refresh = self.refresh_btn.step().map(|_| TimelineAction::Refresh);
             let filter_all = self
@@ -261,12 +265,18 @@ impl<V: View> TimelineView<V> {
                 .mark_all_read_btn
                 .step()
                 .map(|_| TimelineAction::MarkAllRead);
-            let timer = async {
-                mogwai::time::wait_millis(15_000).await;
-                TimelineAction::PollTimer
+
+            // Wait for backend push instead of polling on a timer
+            let server_event = async {
+                if let Some(rx) = &self.server_events {
+                    let _ = rx.recv().await;
+                } else {
+                    futures_lite::future::pending::<()>().await;
+                }
+                TimelineAction::NewServerEvents
             };
 
-            // Race event row clicks against all the buttons + timer
+            // Race event row clicks against all the buttons + server events
             let event_clicks = async {
                 if self.event_rows.is_empty() {
                     futures_lite::future::pending::<TimelineAction>().await
@@ -302,7 +312,7 @@ impl<V: View> TimelineView<V> {
                 .or(filter_all)
                 .or(filter_unread)
                 .or(mark_all)
-                .or(timer)
+                .or(server_event)
                 .or(event_clicks)
                 .await
         };
@@ -313,8 +323,8 @@ impl<V: View> TimelineView<V> {
                 self.refresh_btn.disable();
 
                 // Trigger a backend poll, then reload
-                if let Err(e) = invoke::poll_now().await {
-                    log::warn!("poll_now failed: {e}");
+                if let Err(e) = invoke::send(&Command::PollNow).await {
+                    log::warn!("PollNow failed: {e}");
                 }
                 // Small delay so the backend has time to store results
                 mogwai::time::wait_millis(500).await;
@@ -338,8 +348,11 @@ impl<V: View> TimelineView<V> {
                 }
             }
             TimelineAction::MarkAllRead => {
-                if let Err(e) = invoke::mark_all_read(None).await {
-                    log::error!("mark_all_read failed: {e}");
+                if let Err(e) = invoke::send(&Command::MarkAllRead { repo: None })
+                    .await
+                    .and_then(|r| r.into_ok())
+                {
+                    log::error!("MarkAllRead failed: {e}");
                 }
                 self.load_events().await;
             }
@@ -350,8 +363,11 @@ impl<V: View> TimelineView<V> {
 
                     // Mark as read
                     if !row.event_data.read {
-                        if let Err(e) = invoke::mark_read(&id).await {
-                            log::error!("mark_read failed: {e}");
+                        if let Err(e) = invoke::send(&Command::MarkRead { id })
+                            .await
+                            .and_then(|r| r.into_ok())
+                        {
+                            log::error!("MarkRead failed: {e}");
                         }
                     }
 
@@ -362,8 +378,8 @@ impl<V: View> TimelineView<V> {
                     self.load_events().await;
                 }
             }
-            TimelineAction::PollTimer => {
-                // Silent auto-refresh: just reload events from DB
+            TimelineAction::NewServerEvents => {
+                // Backend pushed new events — reload from DB
                 self.load_events().await;
             }
         }

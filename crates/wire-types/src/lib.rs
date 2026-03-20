@@ -165,6 +165,96 @@ pub struct EventFilter {
     pub limit: Option<u32>,
 }
 
+// ---------------------------------------------------------------------------
+// Typed IPC channel: Command / Response / ServerEvent
+// ---------------------------------------------------------------------------
+
+/// Commands sent from the frontend to the backend via `invoke`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(tag = "type", content = "data")]
+pub enum Command {
+    /// Fetch events matching a filter.
+    GetEvents(EventFilter),
+    /// Fetch a single event by ID.
+    GetEvent { id: String },
+    /// Fetch the current app configuration.
+    GetConfig,
+    /// Trigger an immediate GitHub poll cycle.
+    PollNow,
+    /// Mark a single event as read.
+    MarkRead { id: String },
+    /// Mark all events as read (optionally filtered by repo).
+    MarkAllRead { repo: Option<String> },
+}
+
+/// Responses returned from the backend to the frontend (paired with a Command).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(tag = "type", content = "data")]
+pub enum Response {
+    Events(Vec<GhEvent>),
+    Event(Option<GhEvent>),
+    Config(AppConfig),
+    Ok,
+}
+
+impl Response {
+    /// Unwrap a `Response::Events`, or return an error.
+    pub fn into_events(self) -> Result<Vec<GhEvent>, AppError> {
+        match self {
+            Response::Events(events) => Ok(events),
+            other => Err(AppError::new(
+                ErrorKind::Serialization,
+                format!("expected Response::Events, got {other:?}"),
+            )),
+        }
+    }
+
+    /// Unwrap a `Response::Event`, or return an error.
+    pub fn into_event(self) -> Result<Option<GhEvent>, AppError> {
+        match self {
+            Response::Event(event) => Ok(event),
+            other => Err(AppError::new(
+                ErrorKind::Serialization,
+                format!("expected Response::Event, got {other:?}"),
+            )),
+        }
+    }
+
+    /// Unwrap a `Response::Config`, or return an error.
+    pub fn into_config(self) -> Result<AppConfig, AppError> {
+        match self {
+            Response::Config(config) => Ok(config),
+            other => Err(AppError::new(
+                ErrorKind::Serialization,
+                format!("expected Response::Config, got {other:?}"),
+            )),
+        }
+    }
+
+    /// Unwrap a `Response::Ok`, or return an error.
+    pub fn into_ok(self) -> Result<(), AppError> {
+        match self {
+            Response::Ok => Ok(()),
+            other => Err(AppError::new(
+                ErrorKind::Serialization,
+                format!("expected Response::Ok, got {other:?}"),
+            )),
+        }
+    }
+}
+
+/// Unsolicited events pushed from the backend to the frontend via `emit`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(tag = "type", content = "data")]
+pub enum ServerEvent {
+    /// New events were stored after a poll cycle.
+    NewEvents { count: u32 },
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
 /// Categorises errors so the frontend can branch on the kind.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum ErrorKind {
