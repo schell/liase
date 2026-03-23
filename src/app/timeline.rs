@@ -133,8 +133,10 @@ impl<V: View> CommentRow<V> {
 
 struct EventGroupRow<V: View> {
     wrapper: V::Element,
-    /// Click on the parent row body (opens in browser).
-    parent_click: V::EventListener,
+    /// Click on the "Open" button.
+    open_click: V::EventListener,
+    /// Click on the "Mark Read" button.
+    mark_read_click: V::EventListener,
     parent_data: GhEvent,
     /// Click on the comment-count toggle area.
     toggle_click: V::EventListener,
@@ -218,11 +220,8 @@ impl<V: View> EventGroupRow<V> {
         rsx! {
             let wrapper = div(class = "event-group") {
                 div(class = unread_class) {
-                    div(class = "d-flex justify-content-between align-items-start",
-                        style:cursor = "pointer",
-                        on:click = parent_click,
-                    ) {
-                        div(class = "d-flex align-items-center gap-2") {
+                    div(class = "d-flex justify-content-between align-items-start gap-2") {
+                        div(class = "d-flex align-items-center gap-2 flex-grow-1") {
                             span(class = "event-kind-badge") { {&kind_badge} }
                             span(class = "fw-semibold") { {&event.title} }
                         }
@@ -230,6 +229,14 @@ impl<V: View> EventGroupRow<V> {
                             {&event.repo}
                             " #"
                             {event.number.to_string()}
+                        }
+                        div(class = "event-item-buttons") {
+                            button(class = "btn btn-sm btn-secondary", on:click = open_click) {
+                                "Open"
+                            }
+                            button(class = if event.read { "btn btn-sm btn-secondary d-none" } else { "btn btn-sm btn-secondary" }, on:click = mark_read_click) {
+                                "Mark Read"
+                            }
                         }
                     }
                     div(class = "d-flex justify-content-between align-items-center mt-1") {
@@ -251,7 +258,8 @@ impl<V: View> EventGroupRow<V> {
 
         EventGroupRow {
             wrapper,
-            parent_click,
+            open_click,
+            mark_read_click,
             parent_data: group.parent,
             toggle_click,
             toggle_indicator,
@@ -279,7 +287,11 @@ impl<V: View> EventGroupRow<V> {
                 1 => "1 comment".to_string(),
                 n => format!("{n} comments"),
             };
-            let chevron = if self.expanded { "\u{25BC}" } else { "\u{25B6}" };
+            let chevron = if self.expanded {
+                "\u{25BC}"
+            } else {
+                "\u{25B6}"
+            };
             let text = format!("{label} {chevron}");
             indicator.dyn_el(|el: &web_sys::HtmlElement| el.set_inner_text(&text));
         }
@@ -314,12 +326,20 @@ pub struct TimelineView<V: View> {
     filter_all_btn: Button<V>,
     /// Filter: Unread
     filter_unread_btn: Button<V>,
+    /// Search input element
+    search_input: V::Element,
+    /// Search input change listener
+    search_input_listener: V::EventListener,
     /// Mark all read button
     mark_all_read_btn: Button<V>,
     /// Current grouped event rows
     group_rows: Vec<EventGroupRow<V>>,
+    /// Original loaded events (before filtering)
+    loaded_events: Vec<GhEvent>,
     /// Current filter mode
     filter_mode: FilterMode,
+    /// Current search text
+    search_text: String,
     /// Whether initial load has happened
     loaded: bool,
     /// Receiver for backend-pushed ServerEvents
@@ -347,10 +367,20 @@ impl<V: View> Default for TimelineView<V> {
         }
 
         rsx! {
+            let search_input = input(
+                class = "timeline-event-search form-control flex-grow-1",
+                type = "text",
+                placeholder = "Search events...",
+                on:input = search_input_listener,
+            ) {}
+        }
+
+        rsx! {
             let wrapper = div(class = "d-flex flex-column h-100") {
                 div(class = "p-2 d-flex gap-2 align-items-center border-bottom") {
                     {&filter_all_btn}
                     {&filter_unread_btn}
+                    {&search_input}
                     div(class = "ms-auto d-flex gap-2") {
                         {&mark_all_read_btn}
                         {&refresh_btn}
@@ -370,9 +400,13 @@ impl<V: View> Default for TimelineView<V> {
             refresh_btn,
             filter_all_btn,
             filter_unread_btn,
+            search_input,
+            search_input_listener,
             mark_all_read_btn,
             group_rows: Vec::new(),
+            loaded_events: Vec::new(),
             filter_mode: FilterMode::All,
+            search_text: String::new(),
             loaded: false,
             server_events: None,
         }
@@ -384,8 +418,12 @@ enum TimelineAction {
     FilterAll,
     FilterUnread,
     MarkAllRead,
-    /// Parent row clicked: (group_index)
-    ParentClicked(usize),
+    /// Search text changed
+    SearchTextChanged,
+    /// Parent "Open" button clicked: (group_index)
+    ParentOpenClicked(usize),
+    /// Parent "Mark Read" button clicked: (group_index)
+    ParentMarkReadClicked(usize),
     /// Comment toggle clicked: (group_index)
     ToggleComments(usize),
     /// Comment row clicked: (group_index, comment_index)
@@ -409,28 +447,15 @@ impl<V: View> TimelineView<V> {
         let result = invoke::send(&Command::GetEvents(filter)).await;
         match result.and_then(|r| r.into_events()) {
             Ok(events) => {
-                // Remove old group rows from DOM
-                for row in self.group_rows.drain(..) {
-                    self.event_list.remove_child(&row.wrapper);
-                }
+                // Store the original events for client-side filtering
+                self.loaded_events = events.clone();
+                // Reset search when loading new events
+                self.search_text.clear();
+                self.search_input
+                    .dyn_el(|el: &web_sys::HtmlInputElement| el.set_value(""));
 
-                if events.is_empty() {
-                    let msg = match self.filter_mode {
-                        FilterMode::Unread => "No unread events.",
-                        FilterMode::All => "No events yet. Configure subscriptions in Settings.",
-                    };
-                    self.status_alert.set_text(msg);
-                    self.status_alert.set_flavor(Flavor::Info);
-                    self.status_alert.set_is_visible(true);
-                } else {
-                    self.status_alert.set_is_visible(false);
-                    let groups = group_events(events);
-                    for group in groups {
-                        let row = EventGroupRow::<V>::new(group);
-                        self.event_list.append_child(&row.wrapper);
-                        self.group_rows.push(row);
-                    }
-                }
+                // Rebuild with the new events and empty search
+                self.rebuild_filtered_events();
 
                 self.loaded = true;
             }
@@ -452,6 +477,75 @@ impl<V: View> TimelineView<V> {
             FilterMode::Unread => {
                 self.filter_all_btn.set_flavor(Some(Flavor::Secondary));
                 self.filter_unread_btn.set_flavor(Some(Flavor::Primary));
+            }
+        }
+    }
+
+    /// Rebuild the event list with client-side filtering applied.
+    /// Filters by search text and unread status.
+    fn rebuild_filtered_events(&mut self) {
+        let search_lower = self.search_text.to_lowercase();
+
+        // Remove all rows from DOM
+        for row in self.group_rows.drain(..) {
+            self.event_list.remove_child(&row.wrapper);
+        }
+
+        // Filter events based on current filters
+        let filtered_events: Vec<GhEvent> = self
+            .loaded_events
+            .iter()
+            .filter(|event| {
+                // Check unread filter
+                let passes_unread = match self.filter_mode {
+                    FilterMode::All => true,
+                    FilterMode::Unread => !event.read,
+                };
+
+                // Check search filter
+                let passes_search = if search_lower.is_empty() {
+                    true
+                } else {
+                    // Create searchable string: title author repo number
+                    let searchable = format!(
+                        "{} {} {} #{}",
+                        event.title.to_lowercase(),
+                        event.author.to_lowercase(),
+                        event.repo.to_lowercase(),
+                        event.number
+                    );
+                    searchable.contains(&search_lower)
+                };
+
+                passes_unread && passes_search
+            })
+            .cloned()
+            .collect();
+
+        // Update display
+        if filtered_events.is_empty() {
+            let msg = if !search_lower.is_empty() {
+                "No events match your search.".to_string()
+            } else {
+                match self.filter_mode {
+                    FilterMode::Unread => "No unread events.".to_string(),
+                    FilterMode::All => {
+                        "No events yet. Configure subscriptions in Settings.".to_string()
+                    }
+                }
+            };
+            self.status_alert.set_text(msg);
+            self.status_alert.set_flavor(Flavor::Info);
+            self.status_alert.set_is_visible(true);
+        } else {
+            self.status_alert.set_is_visible(false);
+
+            // Group and display filtered events
+            let groups = group_events(filtered_events);
+            for group in groups {
+                let row = EventGroupRow::<V>::new(group);
+                self.event_list.append_child(&row.wrapper);
+                self.group_rows.push(row);
             }
         }
     }
@@ -479,6 +573,11 @@ impl<V: View> TimelineView<V> {
                 .step()
                 .map(|_| TimelineAction::MarkAllRead);
 
+            let search_change = self
+                .search_input_listener
+                .next()
+                .map(|_| TimelineAction::SearchTextChanged);
+
             // Wait for backend push
             let server_event = async {
                 if let Some(rx) = &self.server_events {
@@ -495,14 +594,23 @@ impl<V: View> TimelineView<V> {
                     futures_lite::future::pending::<TimelineAction>().await
                 } else {
                     // Collect all clickable futures across all groups
-                    let mut futs: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = TimelineAction> + '_>>> = Vec::new();
+                    let mut futs: Vec<
+                        std::pin::Pin<Box<dyn std::future::Future<Output = TimelineAction> + '_>>,
+                    > = Vec::new();
 
                     for (gi, group) in self.group_rows.iter().enumerate() {
-                        // Parent row click
-                        let parent_fut = group.parent_click.next();
+                        // Parent "Open" button click
+                        let open_fut = group.open_click.next();
                         futs.push(Box::pin(async move {
-                            parent_fut.await;
-                            TimelineAction::ParentClicked(gi)
+                            open_fut.await;
+                            TimelineAction::ParentOpenClicked(gi)
+                        }));
+
+                        // Parent "Mark Read" button click
+                        let mark_read_fut = group.mark_read_click.next();
+                        futs.push(Box::pin(async move {
+                            mark_read_fut.await;
+                            TimelineAction::ParentMarkReadClicked(gi)
                         }));
 
                         // Toggle click (only if there are comments)
@@ -540,6 +648,7 @@ impl<V: View> TimelineView<V> {
                 .or(filter_all)
                 .or(filter_unread)
                 .or(mark_all)
+                .or(search_change)
                 .or(server_event)
                 .or(group_clicks)
                 .await
@@ -582,21 +691,46 @@ impl<V: View> TimelineView<V> {
                 }
                 self.load_events().await;
             }
-            TimelineAction::ParentClicked(gi) => {
+            TimelineAction::SearchTextChanged => {
+                let new_text = self
+                    .search_input
+                    .dyn_el(|el: &web_sys::HtmlInputElement| el.value())
+                    .unwrap_or_default();
+                if new_text != self.search_text {
+                    self.search_text = new_text;
+                    self.rebuild_filtered_events();
+                }
+            }
+            TimelineAction::ParentOpenClicked(gi) => {
                 if let Some(group) = self.group_rows.get(gi) {
                     let url = group.parent_data.url.clone();
-                    let id = group.parent_data.id.clone();
+                    open::url(&url).await;
+                    self.load_events().await;
+                }
+            }
+            TimelineAction::ParentMarkReadClicked(gi) => {
+                if let Some(group) = self.group_rows.get(gi) {
+                    let parent_id = group.parent_data.id.clone();
 
-                    if !group.parent_data.read {
-                        if let Err(e) = invoke::send(&Command::MarkRead { id })
+                    // Mark parent as read
+                    if let Err(e) = invoke::send(&Command::MarkRead { id: parent_id })
+                        .await
+                        .and_then(|r| r.into_ok())
+                    {
+                        log::error!("MarkRead parent failed: {e}");
+                    }
+
+                    // Mark all comments as read
+                    for comment in &group.comment_rows {
+                        let comment_id = comment.event_data.id.clone();
+                        if let Err(e) = invoke::send(&Command::MarkRead { id: comment_id })
                             .await
                             .and_then(|r| r.into_ok())
                         {
-                            log::error!("MarkRead failed: {e}");
+                            log::error!("MarkRead comment failed: {e}");
                         }
                     }
 
-                    open::url(&url).await;
                     self.load_events().await;
                 }
             }
